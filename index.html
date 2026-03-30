@@ -274,7 +274,9 @@ const ST={p:{l:'Sin contactar',c:'bp'},c:{l:'Contactado',c:'bc'},r:{l:'Respondi�
 
 let statuses={}, notes={}, msgs={}, enriched={}, exp=null, filt='all', sk=null, sd=1;
 
-function init(){
+const SERVER='https://ozwest-server-production.up.railway.app';
+
+async function init(){
   try{
     statuses=JSON.parse(localStorage.getItem('ozw_s')||'{}');
     notes=JSON.parse(localStorage.getItem('ozw_n')||'{}');
@@ -284,12 +286,39 @@ function init(){
   updateApiDot();
   if(!getKey()) setTimeout(openApi,700);
   render();
+  // Load from server and merge (server wins for shared data)
+  try{
+    const r=await fetch(SERVER+'/tracking');
+    if(r.ok){
+      const data=await r.json();
+      data.forEach(row=>{
+        const id=row.prospect_id;
+        if(row.status&&row.status!=='p') statuses[id]=row.status;
+        if(row.notes) notes[id]=row.notes;
+        if(row.msg) msgs[id]=row.msg;
+        if(row.enriched&&Object.keys(row.enriched).length) enriched[id]=row.enriched;
+      });
+      // Save merged state to localStorage
+      localStorage.setItem('ozw_s',JSON.stringify(statuses));
+      localStorage.setItem('ozw_n',JSON.stringify(notes));
+      localStorage.setItem('ozw_m',JSON.stringify(msgs));
+      localStorage.setItem('ozw_e',JSON.stringify(enriched));
+      render();
+    }
+  }catch(e){ console.log('Server offline, using local data'); }
 }
-function save(){
+
+function saveLocal(){
   localStorage.setItem('ozw_s',JSON.stringify(statuses));
   localStorage.setItem('ozw_n',JSON.stringify(notes));
   localStorage.setItem('ozw_m',JSON.stringify(msgs));
   localStorage.setItem('ozw_e',JSON.stringify(enriched));
+}
+
+async function serverPost(path, body){
+  try{
+    await fetch(SERVER+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  }catch(e){ console.log('Server sync failed (offline?), saved locally only'); }
 }
 function getKey(){return localStorage.getItem('ozw_api')||''}
 function saveApi(){
@@ -552,10 +581,19 @@ function toggleExp(id){
     document.querySelectorAll('#tb tr.xp').forEach(r=>r.scrollIntoView({behavior:'smooth',block:'nearest'}));
   },40);
 }
-function updSt(id,v){statuses[id]=v;save();updateStats();}
+function updSt(id,v){
+  const prev=gs(id);
+  statuses[id]=v;
+  saveLocal();
+  updateStats();
+  const p=PROSPECTS.find(x=>x.id===id);
+  serverPost('/tracking/'+id+'/status',{status:v,status_from:prev,prospect_name:p?.name||'',nicho:p?.nicho||''});
+}
 function saveNote(id){
   const ta=document.getElementById('na-'+id);
-  if(ta)notes[id]=ta.value; save();
+  if(ta)notes[id]=ta.value;
+  saveLocal();
+  serverPost('/tracking/'+id+'/note',{notes:notes[id]||''});
   const btn=ta?.closest('.xin')?.querySelector('.save-btn');
   if(btn){btn.textContent='✓ Guardado';setTimeout(()=>btn.textContent='Guardar nota ↩',1300);}
 }
@@ -563,10 +601,10 @@ function onEdit(id){
   const ta=document.getElementById('mt-'+id);
   if(!ta)return;
   const v=ta.value;
-  msgs[id]=v; save();
+  msgs[id]=v; saveLocal();
+  serverPost('/tracking/'+id+'/msg',{msg:v});
   const wc=document.getElementById('wc-'+id);
   if(wc)wc.innerHTML=wcHtml(v);
-  // Update WA button URL live
   const p=PROSPECTS.find(x=>x.id===id);
   if(!p)return;
   const wbtn=document.getElementById('wabtn-'+id);
@@ -579,13 +617,35 @@ function onEdit(id){
 function onWaClick(ev,id){
   const wbtn=document.getElementById('wabtn-'+id);
   if(wbtn&&wbtn.classList.contains('off')){ev.preventDefault();return;}
-  // Mark as contacted automatically
-  if(gs(id)==='p'){statuses[id]='c';save();updateStats();}
+  if(gs(id)==='p'){
+    const p=PROSPECTS.find(x=>x.id===id);
+    statuses[id]='c'; saveLocal(); updateStats();
+    serverPost('/tracking/'+id+'/status',{status:'c',status_from:'p',prospect_name:p?.name||'',nicho:p?.nicho||''});
+  }
 }
 
 function setLog(id,html){
   const el=document.getElementById('gl-'+id);
   if(el)el.innerHTML=html;
+}
+
+async function apiCall(key, payload){
+  const r=await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{
+      'Content-Type':'application/json',
+      'x-api-key':key,
+      'anthropic-version':'2023-06-01',
+      'anthropic-dangerous-direct-browser-access':'true'
+    },
+    body:JSON.stringify(payload)
+  });
+  const d=await r.json();
+  if(d.error)throw new Error(d.error.message||d.error.type||'API error');
+  // Extract first text block
+  const textBlock=(d.content||[]).find(b=>b.type==='text');
+  if(!textBlock||!textBlock.text)throw new Error('No text in response (stop_reason: '+(d.stop_reason||'?')+')');
+  return textBlock.text.trim();
 }
 
 async function generate(id){
@@ -595,170 +655,137 @@ async function generate(id){
   if(!key){openApi();return;}
 
   const btn=document.getElementById('gb-'+id);
-  if(btn){btn.classList.add('loading');btn.innerHTML='<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 1v2M6 9v2M1 6h2M9 6h2M2.5 2.5l1.4 1.4M8.1 8.1l1.4 1.4M8.1 3.9L9.5 2.5M2.5 9.5l1.4-1.4" stroke-linecap="round"/></svg> Generando…';}
+  const btnIcon='<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 1v2M6 9v2M1 6h2M9 6h2M2.5 2.5l1.4 1.4M8.1 8.1l1.4 1.4M8.1 3.9L9.5 2.5M2.5 9.5l1.4-1.4" stroke-linecap="round"/></svg>';
+  if(btn){btn.classList.add('loading');btn.innerHTML=btnIcon+' Generando…';}
 
-  let siteContent='No se pudo acceder al sitio web.';
+  let siteContent='';
   let foundEmail='', foundIg='', foundLinkedin='';
   const newEmails=[];
 
-  // ── Step 1: Scrape website ──
+  // ── Step 1: Fetch website HTML directly (no CORS proxy needed for many AU sites) ──
   if(p.website){
-    setLog(id,'<span class="step-run">⟳ Scrapeando sitio web…</span>');
+    setLog(id,'<span class="step-run">⟳ Leyendo sitio web…</span>');
     try{
-      const scrapePrompt=`Fetch the website ${p.website} and extract:
-1. Any email addresses visible on the page
-2. Instagram profile URL (instagram.com/...)
-3. LinkedIn URL (linkedin.com/in/ or linkedin.com/company/)
-4. A brief description of the business (2-3 sentences max)
+      // Try direct fetch — works if site allows CORS (many don't, that's fine)
+      const ctrl=new AbortController();
+      setTimeout(()=>ctrl.abort(),6000);
+      const resp=await fetch(p.website,{signal:ctrl.signal,mode:'cors'});
+      const html=await resp.text();
 
-Return ONLY valid JSON in this exact format, nothing else:
-{"emails":["email@example.com"],"instagram":"https://...","linkedin":"https://...","description":"..."}
+      // Extract emails from HTML with regex
+      const emailRx=/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+      const emails=[...new Set((html.match(emailRx)||[]).filter(e=>!e.includes('example')&&!e.includes('sentry')&&!e.includes('png')&&!e.includes('jpg')))];
+      if(emails.length){foundEmail=emails[0];emails.slice(1,4).forEach(e=>newEmails.push(e));}
 
-If something is not found, use empty string or empty array.`;
+      // Extract Instagram
+      const igRx=/instagram\.com\/([a-zA-Z0-9_.]+)/g;
+      const igMatch=igRx.exec(html);
+      if(igMatch&&igMatch[1]&&igMatch[1]!=='p'&&igMatch[1]!=='reel')
+        foundIg='https://www.instagram.com/'+igMatch[1];
 
-      const r1=await fetch('https://api.anthropic.com/v1/messages',{
-        method:'POST',
-        headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-        body:JSON.stringify({
-          model:'claude-sonnet-4-20250514',
-          max_tokens:400,
-          tools:[{type:'web_search_20250305',name:'web_search'}],
-          messages:[{role:'user',content:scrapePrompt}]
-        })
-      });
-      const d1=await r1.json();
+      // Extract LinkedIn
+      const liRx=/linkedin\.com\/(in|company)\/([a-zA-Z0-9_\-]+)/g;
+      const liMatch=liRx.exec(html);
+      if(liMatch)foundLinkedin='https://www.linkedin.com/'+liMatch[1]+'/'+liMatch[2];
 
-      // Extract text from response (may include tool use blocks)
-      let rawText='';
-      if(d1.content){
-        d1.content.forEach(blk=>{
-          if(blk.type==='text')rawText+=blk.text;
-        });
-      }
+      // Brief text snippet for context (first 800 chars of visible text)
+      siteContent=html.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim().slice(0,800);
 
-      // Parse JSON from response
-      try{
-        const match=rawText.match(/\{[\s\S]*\}/);
-        if(match){
-          const parsed=JSON.parse(match[0]);
-          if(parsed.emails&&parsed.emails.length){
-            foundEmail=parsed.emails[0];
-            parsed.emails.slice(1).forEach(e=>{if(e)newEmails.push(e);});
-          }
-          if(parsed.instagram)foundIg=parsed.instagram;
-          if(parsed.linkedin)foundLinkedin=parsed.linkedin;
-          if(parsed.description)siteContent=parsed.description;
-        }
-      }catch(e){}
-
-      // Save enriched data
-      const prev=ge(id);
-      enriched[id]={
-        ...prev,
-        scraped:true,
-        email: foundEmail||prev.email||p.email||'',
-        ig: foundIg||prev.ig||p.ig||'',
-        linkedin: foundLinkedin||prev.linkedin||'',
-        new_emails: newEmails,
-      };
-      save();
-
-      // Update contacts block live
-      const cr=document.getElementById('cr-'+id);
-      if(cr)cr.innerHTML=contactsBlock(p);
-
-      const found=[];
-      if(foundEmail)found.push('✉ email');
-      if(foundIg)found.push('IG');
-      if(foundLinkedin)found.push('LinkedIn');
-      setLog(id,`<span class="step-ok">✓ Sitio scrapeado${found.length?' — encontré: '+found.join(', '):' — sin contactos nuevos'}</span>`);
-
-    }catch(e){
-      setLog(id,'<span style="color:var(--amber)">⚠ No se pudo scrapear — generando igual</span>');
+    }catch(fetchErr){
+      // CORS blocked or timeout — that's fine, continue without site content
+      setLog(id,'<span style="color:var(--text3)">⟳ Sitio no accesible por CORS — generando con datos del CSV…</span>');
     }
-  } else {
-    setLog(id,'<span style="color:var(--text3)">Sin sitio web — generando con datos disponibles</span>');
+
+    // Save whatever we found
+    const prev=ge(id);
+    enriched[id]={
+      ...prev, scraped:true,
+      email:foundEmail||prev.email||p.email||'',
+      ig:foundIg||prev.ig||p.ig||'',
+      linkedin:foundLinkedin||prev.linkedin||'',
+      new_emails:newEmails,
+    };
+    saveLocal();
+    serverPost('/tracking/'+id+'/enriched',{enriched:enriched[id]});
+    const cr=document.getElementById('cr-'+id);
+    if(cr)cr.innerHTML=contactsBlock(p);
+
+    const found=[];
+    if(foundEmail)found.push('✉ email');
+    if(foundIg)found.push('IG');
+    if(foundLinkedin)found.push('LinkedIn');
+    if(found.length)
+      setLog(id,`<span class="step-ok">✓ Encontré: ${found.join(', ')}</span>`);
+    else
+      setLog(id,`<span style="color:var(--text3)">Sin contactos nuevos en el sitio</span>`);
   }
 
-  // ── Step 2: Generate message ──
-  setLog(id,prev=>prev); // keep log
+  // ── Step 2: Generate message with Claude ──
   const e2=ge(id);
-  const allContacts=[];
-  if(p.wa||p.phone)allContacts.push('WhatsApp: '+p.phone);
-  if(e2.email||p.email)allContacts.push('Email: '+(e2.email||p.email));
-  if(e2.ig||p.ig)allContacts.push('Instagram: '+(e2.ig||p.ig));
-  if(e2.linkedin)allContacts.push('LinkedIn: '+e2.linkedin);
+  const channels=[];
+  if(p.phone)channels.push('WhatsApp/phone: '+p.phone);
+  if(e2.email||p.email)channels.push('Email: '+(e2.email||p.email));
+  if(e2.ig||p.ig)channels.push('Instagram: '+(e2.ig||p.ig));
+  if(e2.linkedin)channels.push('LinkedIn: '+e2.linkedin);
 
   const msgPrompt=`You are the Head of Growth at OZ West Cleaning, a commercial cleaning company in Perth, Australia.
 Core differentiator: 24/7 service — the space is ready before it opens.
 Fixed rule: always include 20% off the first clean.
 
 Write a cold outreach WhatsApp message for this prospect:
-Name: ${p.name}
-Niche: ${p.nicho}
-Location: ${p.addr}, Perth
-Rating: ${p.rating} (${p.reviews} reviews)
-About: ${siteContent}
-Available channels: ${allContacts.join(' | ')||'phone only'}
+- Name: ${p.name}
+- Niche: ${p.nicho}
+- Location: ${p.addr}, Perth WA
+- Rating: ${p.rating} stars (${p.reviews} reviews)
+- Website: ${p.website||'n/a'}
+- Site context: ${siteContent?siteContent.slice(0,300):'not available'}
+- Channels available: ${channels.join(' | ')||'phone only'}
 
-Message rules:
-1. "Timeline hook" structure: prospect imagines their space ready before opening (6:55am, doors about to open, place already clean)
-2. MAX 50 words — count strictly
-3. No sales tone, no filler
-4. Include the 20% off first clean offer
-5. Only use verified data — don't invent opening hours or details not in the data above
-6. Tone: direct, confident, specific. End with a minimal CTA (one simple question)
-7. Adapt the hook to the niche: gym = 6am before members, clinic = 8am before patients, office = before the team, dance studio = before first class, etc.
-8. Don't mention OZ West by name in the first message
+Rules:
+1. "Timeline hook": the prospect visualises their space ready before opening — 6:55am, doors about to open, already clean
+2. MAX 50 words — count strictly, do not exceed
+3. No sales tone, no filler, no "I hope this finds you well"
+4. Must include: 20% off the first clean
+5. Use only verified facts — do NOT invent hours, staff, or details not given above
+6. Tone: direct, confident, specific. End with one simple question as CTA
+7. Adapt opening time to niche: gym=6am, clinic/dental=8am, office=before 9am, dance/music=before first class, childcare=7:30am
+8. Do NOT mention OZ West by name
 9. Write in English
 
-Return ONLY the message text, no labels, no explanation.`;
+Return ONLY the message. Nothing else.`;
 
   try{
-    const r2=await fetch('https://api.anthropic.com/v1/messages',{
-      method:'POST',
-      headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({
-        model:'claude-sonnet-4-20250514',
-        max_tokens:200,
-        messages:[{role:'user',content:msgPrompt}]
-      })
+    const text=await apiCall(key,{
+      model:'claude-sonnet-4-20250514',
+      max_tokens:200,
+      messages:[{role:'user',content:msgPrompt}]
     });
-    const d2=await r2.json();
-    const text=(d2.content&&d2.content[0]&&d2.content[0].text||'').trim();
-    if(!text)throw new Error('empty');
 
-    msgs[id]=text; save();
+    msgs[id]=text; saveLocal();
+    serverPost('/tracking/'+id+'/msg',{msg:text});
 
-    // Update textarea
     const ta=document.getElementById('mt-'+id);
-    if(ta){ta.value=text;}
+    if(ta)ta.value=text;
 
-    // Update WA button
     const wbtn=document.getElementById('wabtn-'+id);
     if(wbtn){
       const url=waUrl(p.phone,text);
-      if(url){wbtn.href=url;wbtn.className='wa-btn';}
+      wbtn.href=url||'#';
+      wbtn.className='wa-btn'+(url?'':' off');
     }
 
-    // Update word count
     const wcel=document.getElementById('wc-'+id);
     if(wcel)wcel.innerHTML=wcHtml(text);
 
     const logEl=document.getElementById('gl-'+id);
-    if(logEl){
-      const prev=logEl.innerHTML;
-      logEl.innerHTML=prev+'<br><span class="step-ok">✓ Mensaje generado ('+text.trim().split(/\s+/).length+' palabras)</span>';
-    }
-    render(); // refresh preview in table row
+    if(logEl)logEl.innerHTML+='<br><span class="step-ok">✓ Mensaje generado — '+text.trim().split(/\s+/).length+' palabras</span>';
 
-  }catch(e){
-    setLog(id,`<span style="color:var(--red)">Error generando mensaje: ${e.message||'intentá de nuevo'}</span>`);
+    render();
+
+  }catch(err){
+    setLog(id,`<span style="color:var(--red)">✗ Error: ${err.message}</span>`);
   }finally{
-    if(btn){
-      btn.classList.remove('loading');
-      btn.innerHTML='<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 1v2M6 9v2M1 6h2M9 6h2M2.5 2.5l1.4 1.4M8.1 8.1l1.4 1.4M8.1 3.9L9.5 2.5M2.5 9.5l1.4-1.4" stroke-linecap="round"/></svg> Regenerar';
-    }
+    if(btn){btn.classList.remove('loading');btn.innerHTML=btnIcon+' Regenerar';}
   }
 }
 
