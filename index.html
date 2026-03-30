@@ -68,7 +68,7 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:1
 /* Table */
 .tw{padding:0 24px 40px;overflow-x:auto}
 table{width:100%;border-collapse:collapse;min-width:880px}
-thead th{font-size:10px;font-weight:500;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;padding:9px 10px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;position:sticky;top:95px;background:var(--bg);z-index:9;cursor:pointer;user-select:none}
+thead th{font-size:10px;font-weight:500;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;padding:9px 10px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;position:sticky;top:192px;background:var(--bg);z-index:9;cursor:pointer;user-select:none}
 thead th:hover{color:var(--text2)}
 thead th.sa::after{content:" ↑";color:var(--accent)}
 thead th.sd::after{content:" ↓";color:var(--accent)}
@@ -474,6 +474,7 @@ async function init(){
   const CSV_STATUSES = {"345": "c", "348": "c", "349": "c", "351": "c"};
   Object.entries(CSV_STATUSES).forEach(([id,s])=>{ if(!statuses[id]||statuses[id]==='p') statuses[id]=s; });
   render();
+  setTimeout(fixStickyHeader, 150);
   // Load from server and merge (server wins for shared data)
   try{
     const r=await fetch(SERVER+'/tracking');
@@ -975,6 +976,17 @@ Return ONLY the message. Nothing else.`;
   }finally{
     if(btn){btn.classList.remove('loading');btn.innerHTML=btnIcon+' Regenerar';}
   }
+}
+
+
+function fixStickyHeader(){
+  const header = document.querySelector('.header');
+  const tabNav = document.querySelector('.tab-nav');
+  const prog = document.querySelector('.prog-wrap');
+  const controls = document.querySelector('.controls');
+  if(!header||!tabNav||!prog||!controls) return;
+  const top = header.offsetHeight + tabNav.offsetHeight + prog.offsetHeight + controls.offsetHeight;
+  document.querySelectorAll('thead th').forEach(th => th.style.top = top + 'px');
 }
 
 
